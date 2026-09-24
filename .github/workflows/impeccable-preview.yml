@@ -184,7 +184,7 @@ jobs:
         run: |
           exec > >(tee impeccable-step.log) 2>&1
           if [ ! -d "$OUT" ] || [ -z "$(find -L "$OUT" -maxdepth 2 -name index.html -print -quit)" ]; then
-            echo 'Entry page not found in "dist", and nobody set an output directory. Set the output directory for this app, or, if it is a server, choose the method that starts it'
+            echo 'Entry page not found in "dist". Set the output directory for this app, or, if it is a server, choose the method that starts it'
             exit 1
           fi
           TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \

@@ -8,7 +8,7 @@
  */
 
 :root {
-  --sf-page-width: 1120px;
+  --sf-page-width: 1200px;
   --sf-gutter: var(--acme-space-5);
   --sf-accent: var(--acme-color-brand-500);
   --sf-accent-dark: var(--acme-color-brand-700);

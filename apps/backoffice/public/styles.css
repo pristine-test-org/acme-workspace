@@ -198,7 +198,7 @@ a {
 
 .stat__label {
   display: block;
-  color: var(--acme-color-ink-muted);
+  color: #cbd5e1;
   font-size: var(--acme-text-xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;

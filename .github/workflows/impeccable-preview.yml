@@ -7,6 +7,7 @@
 name: impeccable preview
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 permissions:
@@ -15,6 +16,7 @@ permissions:
 jobs:
   preview-docs:
     name: "Handbook"
+    if: github.event.action != 'ready_for_review'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +53,7 @@ jobs:
               -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data-binary @-
   preview-backoffice:
     name: "Order desk"
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -75,15 +78,45 @@ jobs:
         working-directory: apps/backoffice
         run: |
           curl -sSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared && chmod +x cloudflared
-          ./cloudflared tunnel --url "http://localhost:3001" --no-autoupdate > tunnel.log 2>&1 &
-          for i in $(seq 1 30); do URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -1); [ -n "$URL" ] && break; sleep 2; done
-          test -n "$URL" || { echo "no tunnel URL"; cat tunnel.log; exit 1; }
           TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=impeccable.reviews" | jq -r .value)
-          REG=$(curl -sS --fail-with-body -X POST https://impeccable.reviews/api/tunnels \
-            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-            -d "{\"url\": \"$URL\", \"app\": \"backoffice\"}")
-          echo "$REG"
+          release_tunnel() {
+            [ -n "$IMPECCABLE_TUNNEL_ID" ] || return 0
+            RELEASE_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=impeccable.reviews" | jq -r .value)
+            curl -sS -X DELETE "https://impeccable.reviews/api/tunnels/named/$IMPECCABLE_TUNNEL_ID" \
+              -H "Authorization: Bearer $RELEASE_TOKEN" >/dev/null || true
+            IMPECCABLE_TUNNEL_ID=""
+          }
+          WAITING_SINCE=""
+          while :; do
+            REG=$(curl -sS --fail-with-body -X POST https://impeccable.reviews/api/tunnels/named \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+              -d "{\"port\": 3001, \"app\": \"backoffice\"}") || true
+            TUNNEL_TOKEN=$(echo "$REG" | jq -r '.tunnelToken // empty' 2>/dev/null) || true
+            REASON=$(echo "$REG" | jq -r '.error // empty' 2>/dev/null) || true
+            if [ -n "$TUNNEL_TOKEN" ]; then break; fi
+            if [ "$(echo "$REG" | jq -r '.retry // false' 2>/dev/null)" != "true" ]; then break; fi
+            WAIT_S=$(( $(echo "$REG" | jq -r '.waitMs // 0' 2>/dev/null) / 1000 ))
+            RETRY_S=$(( $(echo "$REG" | jq -r '.retryAfterMs // 15000' 2>/dev/null) / 1000 ))
+            if [ -z "$WAITING_SINCE" ]; then
+              WAITING_SINCE=$SECONDS
+              echo "no named tunnel yet (${REASON:-Impeccable did not say}); trying again for up to ${WAIT_S}s"
+            fi
+            WAITED=$(( SECONDS - WAITING_SINCE ))
+            if [ "$WAITED" -ge "$WAIT_S" ]; then echo "still no named tunnel after ${WAITED}s (${REASON:-Impeccable did not say})"; break; fi
+            sleep "${RETRY_S:-15}"
+          done
+          test -n "$TUNNEL_TOKEN" || { echo "::error title=No preview tunnel::Impeccable did not open a tunnel for this review: ${REASON:-Impeccable did not answer}. Nothing was tunnelled, so the review has no pages to look at; the review of this pull request says whether the fix is in this repository or on Impeccable's side, and re-running this job is enough when it is Impeccable's."; exit 1; }
+          echo "::add-mask::$TUNNEL_TOKEN"
+          echo "$REG" | jq 'del(.tunnelToken)'
+          echo "named tunnel: $(echo "$REG" | jq -r .url) (gated: a bare link gets a 403)"
+          IMPECCABLE_TUNNEL_ID=$(echo "$REG" | jq -r '.id // empty')
+          echo "IMPECCABLE_TUNNEL_ID=$IMPECCABLE_TUNNEL_ID" >> "$GITHUB_ENV"
+          trap release_tunnel EXIT INT TERM
+          SUPERSEDED=$(echo "$REG" | jq -r '(.superseded // []) | join(" ")' 2>/dev/null) || true
+          if [ -n "$SUPERSEDED" ]; then echo "an earlier push of this pull request was superseded and its tunnel released ($SUPERSEDED)"; fi
+          TUNNEL_TOKEN="$TUNNEL_TOKEN" ./cloudflared tunnel run > tunnel.log 2>&1 &
           POLL=$(echo "$REG" | jq -r .poll)
           POLLED="$REG"
           WAIT=2
@@ -95,11 +128,22 @@ jobs:
           done
           echo "impeccable access check: $(echo "$POLLED" | jq -r '.access.detail // "not run"')"
           for i in $(seq 1 120); do
-            STATE=$(curl -sS "https://impeccable.reviews$POLL" | jq -r .state)
+            ANSWER=$(curl -sS -w '\n%{http_code}' "https://impeccable.reviews$POLL" 2>/dev/null || true)
+            STATE=$(echo "$ANSWER" | sed '$d' | jq -r '.state // empty' 2>/dev/null || true)
             [ "$STATE" = "done" ] && break
+            [ -n "$STATE" ] || echo "impeccable poll: HTTP $(echo "$ANSWER" | tail -n 1), no review state in the answer; asking again"
             sleep 10
           done
           echo "review done; closing the tunnel"
+      - name: Give the preview tunnel back
+        if: always()
+        run: |
+          [ -n "$IMPECCABLE_TUNNEL_ID" ] || exit 0
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=impeccable.reviews" | jq -r .value || true)
+          ANSWER=$(curl -sS -X DELETE "https://impeccable.reviews/api/tunnels/named/$IMPECCABLE_TUNNEL_ID" \
+            -H "Authorization: Bearer $TOKEN" || true)
+          echo "give the tunnel back: $(echo "$ANSWER" | jq -r '.error // "released"' 2>/dev/null || echo "${ANSWER:-no answer}")"
       - name: Tell Impeccable what failed
         if: failure()
         working-directory: apps/backoffice
@@ -113,6 +157,7 @@ jobs:
               -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data-binary @-
   preview-storefront:
     name: "Storefront"
+    if: github.event.action != 'ready_for_review'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -139,7 +184,7 @@ jobs:
         run: |
           exec > >(tee impeccable-step.log) 2>&1
           if [ ! -d "$OUT" ] || [ -z "$(find -L "$OUT" -maxdepth 2 -name index.html -print -quit)" ]; then
-            echo 'Entry page not found in "dist". Set the output directory for this app, or, if it is a server, choose the method that starts it'
+            echo 'Entry page not found in "dist", and nobody set an output directory. Set the output directory for this app, or, if it is a server, choose the method that starts it'
             exit 1
           fi
           TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \

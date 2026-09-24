@@ -324,7 +324,7 @@ a {
 
 .table__sub {
   display: block;
-  color: var(--acme-color-ink-muted);
+  color: #cfd6e0;
   font-size: var(--acme-text-xs);
 }
 

@@ -876,3 +876,14 @@ a {
     gap: var(--acme-space-4);
   }
 }
+
+@media (max-width: 479px) {
+  /* Keep the two hero actions on one line on small phones. */
+  .hero__actions {
+    flex-wrap: nowrap;
+  }
+
+  .hero__actions .button {
+    min-width: 220px;
+  }
+}
